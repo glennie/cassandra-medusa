@@ -22,6 +22,8 @@ import subprocess
 import sys
 import time
 import uuid
+import hashlib
+import pathlib
 
 import medusa.config
 import medusa.utils
@@ -109,7 +111,7 @@ def restore_node_locally(config, temp_dir, backup_name, in_place, keep_auth, see
         if fqtn not in fqtns_to_restore:
             logging.debug('Skipping restore for {}'.format(fqtn))
             continue
-        maybe_restore_section(section, download_dir, cassandra.root, in_place, keep_auth, use_sudo)
+        maybe_restore_section(section, download_dir, cassandra.data_dirs, in_place, keep_auth, use_sudo)
 
     node_fqdn = storage.config.fqdn
     token_map_file = download_dir / 'tokenmap.json'
@@ -281,7 +283,7 @@ def clean_path(p, use_sudo, keep_folder=False):
                 subprocess.check_output(['rm', '-rf', path])
 
 
-def maybe_restore_section(section, download_dir, cassandra_data_dir, in_place, keep_auth, use_sudo=True):
+def maybe_restore_section(section, download_dir, cassandra_data_dirs, in_place, keep_auth, use_sudo=True):
     # decide whether to restore files for this table or not
 
     # we restore everything from all keyspaces when restoring in_place
@@ -300,44 +302,51 @@ def maybe_restore_section(section, download_dir, cassandra_data_dir, in_place, k
             logging.info('Keeping section {}.{} untouched'.format(section['keyspace'], section['columnfamily']))
             return
 
-    src = download_dir / section['keyspace'] / section['columnfamily']
-    # not appending the column family name because mv later on copies the whole folder
-    dst = cassandra_data_dir / section['keyspace'] / section['columnfamily']
+    if len(section.get('objects', [])) > 0:
+        first_opject = section['objects'][0]
+        cassandra_data_dir = pathlib.Path(first_opject['data_dir'])
+        data_dir_hash = hashlib.md5(str(cassandra_data_dir).encode('utf-8')).hexdigest()
+        if data_dir_hash != first_opject['data_dir_hash'] or str(cassandra_data_dir) not in cassandra_data_dirs:
+            raise Exception('Error: data in manifest doest match saved data!')
+        src = download_dir / data_dir_hash / section['keyspace'] / section['columnfamily']
+        # not appending the column family name because mv later on copies the whole folder
+        dst = cassandra_data_dir / section['keyspace'] / section['columnfamily']
 
-    # prepare the destination folder
-    if dst.exists():
-        logging.debug('Cleaning directory {}'.format(dst))
-        if use_sudo:
-            subprocess.check_output(['sudo', '-u', cassandra_data_dir.owner(),
-                                     'rm', '-rf', str(dst)])
+        # prepare the destination folder
+        if dst.exists():
+            logging.debug('Cleaning directory {}'.format(dst))
+            if use_sudo:
+                subprocess.check_output(['sudo', '-u', cassandra_data_dir.owner(),
+                                        'rm', '-rf', str(dst)])
+            else:
+                subprocess.check_output(['rm', '-rf', str(dst)])
         else:
-            subprocess.check_output(['rm', '-rf', str(dst)])
-    else:
-        logging.debug('Creating directory {}'.format(dst))
+            logging.debug('Creating directory {}'.format(dst))
+            if use_sudo:
+                subprocess.check_output(['sudo', '-u', cassandra_data_dir.owner(),
+                                        'mkdir', '-p', str(cassandra_data_dir / section['keyspace'])])
+            else:
+                subprocess.check_output(['mkdir', '-p', str(cassandra_data_dir / section['keyspace'])])
+
+        if not restore_section:
+            logging.debug("Skipping the actual restore of {}".format(section['columnfamily']))
+            return
+
+        if not section['objects']:
+            logging.debug("Skipping the actual restore of {} - table empty".format(section['columnfamily']))
+            return
+
+        # restore the table
+        logging.debug('Restoring {} -> {}'.format(src, dst))
+
         if use_sudo:
-            subprocess.check_output(['sudo', '-u', cassandra_data_dir.owner(),
-                                     'mkdir', '-p', str(cassandra_data_dir / section['keyspace'])])
+            subprocess.check_output(['sudo', 'mv', str(src), str(dst)])
+            file_ownership = '{}:{}'.format(cassandra_data_dir.owner(), cassandra_data_dir.group())
+            subprocess.check_output(['sudo', 'chown', '-R', file_ownership, str(dst)])
         else:
-            subprocess.check_output(['mkdir', '-p', str(cassandra_data_dir / section['keyspace'])])
-
-    if not restore_section:
-        logging.debug("Skipping the actual restore of {}".format(section['columnfamily']))
-        return
-
-    if not section['objects']:
-        logging.debug("Skipping the actual restore of {} - table empty".format(section['columnfamily']))
-        return
-
-    # restore the table
-    logging.debug('Restoring {} -> {}'.format(src, dst))
-    if use_sudo:
-        subprocess.check_output(['sudo', 'mv', str(src), str(dst)])
-        file_ownership = '{}:{}'.format(cassandra_data_dir.owner(), cassandra_data_dir.group())
-        subprocess.check_output(['sudo', 'chown', '-R', file_ownership, str(dst)])
-    else:
-        subprocess.check_output(['mv', str(src), str(dst)])
-        file_ownership = '{}:{}'.format(cassandra_data_dir.owner(), cassandra_data_dir.group())
-        subprocess.check_output(['chown', '-R', file_ownership, str(dst)])
+            subprocess.check_output(['mv', str(src), str(dst)])
+            file_ownership = '{}:{}'.format(cassandra_data_dir.owner(), cassandra_data_dir.group())
+            subprocess.check_output(['chown', '-R', file_ownership, str(dst)])
 
 
 def get_node_tokens(node_fqdn, token_map_file):

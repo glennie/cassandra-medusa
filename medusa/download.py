@@ -17,6 +17,7 @@ import logging
 import json
 import pathlib
 import sys
+import hashlib
 
 from medusa.storage import Storage, divide_chunks
 from medusa.storage.google_storage import GSUTIL_MAX_FILES_PER_CHUNK
@@ -30,30 +31,40 @@ def download_data(storageconfig, backup, fqtns_to_restore, destination):
     for section in manifest:
 
         fqtn = "{}.{}".format(section['keyspace'], section['columnfamily'])
-        dst = destination / section['keyspace'] / section['columnfamily']
-        srcs = ['{}{}'.format(storage.storage_driver.get_path_prefix(backup.data_path), obj['path'])
-                for obj in section['objects']]
 
-        if len(srcs) > 0 and (len(fqtns_to_restore) == 0 or fqtn in fqtns_to_restore):
-            logging.debug('Downloading  %s files to %s', len(srcs), dst)
+        # Build an hash with manifest ojects paths and data_dir as key
+        objects_by_data_dir = {}
 
-            dst.mkdir(parents=True)
+        for obj in section['objects']:
+            objects_by_data_dir[obj['data_dir']] = objects_by_data_dir.get(obj['data_dir'], []) + ['{}{}'.format(
+                storage.storage_driver.get_path_prefix(backup.data_path), obj['path'])]
 
-            # check for hidden sub-folders in the table directory
-            # (e.g. secondary indices which live in table/.table_idx)
-            dst_subfolders = {dst / src.parent.name
-                              for src in map(pathlib.Path, srcs)
-                              if src.parent.name.startswith('.')}
-            # create the sub-folders so the downloads actually work
-            for subfolder in dst_subfolders:
-                subfolder.mkdir(parents=False)
+        for data_dir, blobs in objects_by_data_dir.items():
+            srcs = blobs
 
-            for src_batch in divide_chunks(srcs, GSUTIL_MAX_FILES_PER_CHUNK):
-                storage.storage_driver.download_blobs(src_batch, dst)
-        elif len(srcs) == 0 and (len(fqtns_to_restore) == 0 or fqtn in fqtns_to_restore):
-            logging.debug('There is nothing to download for {}'.format(fqtn))
-        else:
-            logging.debug('Download of {} was not requested, skipping'.format(fqtn))
+            data_dir_hash = hashlib.md5(data_dir.encode('utf-8')).hexdigest()
+            dst = destination / data_dir_hash / section['keyspace'] / section['columnfamily']
+
+            if len(srcs) > 0 and (len(fqtns_to_restore) == 0 or fqtn in fqtns_to_restore):
+                logging.debug('Downloading  %s files to %s', len(srcs), dst)
+
+                dst.mkdir(parents=True)
+
+                # check for hidden sub-folders in the table directory
+                # (e.g. secondary indices which live in table/.table_idx)
+                dst_subfolders = {dst / src.parent.name
+                                  for src in map(pathlib.Path, srcs)
+                                  if src.parent.name.startswith('.')}
+                # create the sub-folders so the downloads actually work
+                for subfolder in dst_subfolders:
+                    subfolder.mkdir(parents=False)
+
+                for src_batch in divide_chunks(srcs, GSUTIL_MAX_FILES_PER_CHUNK):
+                    storage.storage_driver.download_blobs(src_batch, dst)
+            elif len(srcs) == 0 and (len(fqtns_to_restore) == 0 or fqtn in fqtns_to_restore):
+                logging.debug('There is nothing to download for {}'.format(fqtn))
+            else:
+                logging.debug('Download of {} was not requested, skipping'.format(fqtn))
 
     logging.info('Downloading backup metadata...')
     storage.storage_driver.download_blobs(

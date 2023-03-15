@@ -228,13 +228,15 @@ class CassandraConfigReader(object):
             self._config = yaml.load(f, Loader=yaml.BaseLoader)
 
     @property
-    def root(self):
-        data_file_directories = self._config.get('data_file_directories', ['/var/lib/cassandra/data'])
-        if not data_file_directories:
+    def data_dirs(self):
+        tmp_data_file_directories = self._config.get('data_file_directories', ['/var/lib/cassandra/data'])
+        if not tmp_data_file_directories:
             raise RuntimeError('data_file_directories must be properly configured')
-        if len(data_file_directories) > 1:
-            raise RuntimeError('Medusa only supports one data directory')
-        return pathlib.Path(data_file_directories[0])
+
+        data_file_directories = {}
+        for _ in tmp_data_file_directories:
+            data_file_directories[_] = pathlib.Path(_)
+        return data_file_directories
 
     @property
     def commitlog_directory(self):
@@ -338,7 +340,8 @@ class Cassandra(object):
         self._nodetool = Nodetool(cassandra_config)
         config_reader = CassandraConfigReader(cassandra_config.config_file, release_version)
         self._cassandra_config_file = cassandra_config.config_file
-        self._root = config_reader.root
+        self._root = None
+        self._data_dirs = config_reader.data_dirs
         self._commitlog_path = config_reader.commitlog_directory
         self._saved_caches_path = config_reader.saved_caches_directory
         self._hostname = contact_point if contact_point is not None else config_reader.listen_address
@@ -370,8 +373,8 @@ class Cassandra(object):
         return self._cql_session_provider.new_session()
 
     @property
-    def root(self):
-        return self._root
+    def data_dirs(self):
+        return self._data_dirs
 
     @property
     def commit_logs_path(self):
@@ -422,21 +425,26 @@ class Cassandra(object):
             return self._tag
 
         @property
-        def root(self):
-            return self._parent.root
+        def data_dirs(self):
+            return self._parent.data_dirs
 
         def find_dirs(self):
-            return [
-                SnapshotPath(
-                    pathlib.Path(snapshot_dir),
-                    *snapshot_dir.relative_to(self.root).parts[:2]
-                )
-                for snapshot_dir in self.root.glob(
-                    Cassandra.SNAPSHOT_PATTERN.format(self._tag)
-                )
-                if (snapshot_dir.is_dir() and snapshot_dir.parts[-4]
-                    not in CqlSession.EXCLUDED_KEYSPACES)
-            ]
+            found_directories = {}
+            for key, data_file_directory in self.data_dirs.items():
+                snapshots_dirs = [
+                    SnapshotPath(
+                        pathlib.Path(snapshot_dir),
+                        *snapshot_dir.relative_to(data_file_directory).parts[:2]
+                    )
+                    for snapshot_dir in data_file_directory.glob(
+                        Cassandra.SNAPSHOT_PATTERN.format(self._tag)
+                    )
+                    if (snapshot_dir.is_dir() and snapshot_dir.parts[-4]
+                        not in CqlSession.EXCLUDED_KEYSPACES)
+                ]
+                if len(snapshots_dirs) > 0:
+                    found_directories[key] = snapshots_dirs
+            return found_directories
 
         def delete(self):
             self._parent.delete_snapshot(self._tag)
@@ -456,6 +464,7 @@ class Cassandra(object):
             self.snapshot_service.delete_snapshot(tag=tag)
 
     def list_snapshotnames(self):
+        # TODO: validate this function for multi data dirs, but this function seems unused
         return {
             snapshot.name
             for snapshot in self.root.glob(self.SNAPSHOT_PATTERN.format('*'))
@@ -469,9 +478,10 @@ class Cassandra(object):
         raise KeyError('Snapshot {} does not exist'.format(tag))
 
     def snapshot_exists(self, tag):
-        for snapshot in self.root.glob(self.SNAPSHOT_PATTERN.format('*')):
-            if snapshot.is_dir() and snapshot.name == tag:
-                return True
+        for data_file_directory in self.data_dirs.values():
+            for snapshot in data_file_directory.glob(self.SNAPSHOT_PATTERN.format('*')):
+                if snapshot.is_dir() and snapshot.name == tag:
+                    return True
         return False
 
     def create_snapshot_command(self, backup_name):

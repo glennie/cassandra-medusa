@@ -38,7 +38,7 @@ from medusa.storage.azure_storage import AzureStorage
 from medusa.storage.s3_base_storage import S3BaseStorage
 
 
-ManifestObject = collections.namedtuple('ManifestObject', ['path', 'size', 'MD5'])
+ManifestObject = collections.namedtuple('ManifestObject', ['path', 'size', 'MD5', 'data_dir', 'data_dir_hash'])
 
 # pattern meant to match just the blob name, not the entire path
 # the path is covered by the initial .*

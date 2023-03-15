@@ -104,8 +104,17 @@ def __upload_file(storage, connection, src, dest, bucket):
     obj_name = '{}/{}'.format(src.parent.name, src.name) if src.parent.name.startswith('.') else src.name
     full_object_name = str("{}/{}".format(dest, obj_name))
     obj = _upload_single_part(storage, connection, src, bucket, full_object_name)
-
-    return medusa.storage.ManifestObject(obj.name, obj.size, obj.hash.replace('"', ''))
+    splited_dest = dest.split(os.path.sep)
+    splited_src = str(src).split(os.path.sep)
+    dest_slug = splited_dest.index('data')
+    data_dir_hash = splited_dest[dest_slug + 1]
+    keyspace = splited_dest[dest_slug + 2]
+    keyspace_pos = splited_src.index(keyspace)
+    tmp_data_dir = splited_src[0:keyspace_pos]
+    data_dir = os.path.join(*tmp_data_dir)
+    if splited_src[0] == '':
+        data_dir = os.path.sep + data_dir
+    return medusa.storage.ManifestObject(obj.name, obj.size, obj.hash.replace('"', ''), data_dir, data_dir_hash)
 
 
 @retry(stop_max_attempt_number=MAX_UPLOAD_RETRIES, wait_fixed=5000)

@@ -21,6 +21,7 @@ import pathlib
 import time
 import traceback
 import psutil
+import hashlib
 
 from libcloud.storage.providers import Provider
 from retrying import retry
@@ -293,7 +294,7 @@ def do_backup(cassandra, node_backup, storage, differential_mode, enable_md5_che
     logging.info('Creating snapshot')
     with cassandra.create_snapshot(backup_name) as snapshot:
         manifest = []
-        num_files = backup_snapshots(storage, manifest, node_backup, node_backup_cache, snapshot)
+        num_files = backup_snapshots(storage, manifest, node_backup, node_backup_cache, snapshot, cassandra.data_dirs)
 
     logging.info('Updating backup index')
     node_backup.manifest = json.dumps(manifest)
@@ -343,36 +344,38 @@ def update_monitoring(actual_backup_duration, backup_name, monitoring, node_back
     logging.debug('Done emitting metrics')
 
 
-def backup_snapshots(storage, manifest, node_backup, node_backup_cache, snapshot):
+def backup_snapshots(storage, manifest, node_backup, node_backup_cache, snapshot, data_dirs):
     try:
         num_files = 0
-        for snapshot_path in snapshot.find_dirs():
-            logging.debug("Backing up {}".format(snapshot_path))
+        for data_dir, snapshot_paths in snapshot.find_dirs().items():
+            for snapshot_path in snapshot_paths:
+                (needs_backup, already_backed_up) = node_backup_cache.replace_or_remove_if_cached(
+                    keyspace=snapshot_path.keyspace,
+                    columnfamily=snapshot_path.columnfamily,
+                    srcs=list(snapshot_path.list_files()))
 
-            (needs_backup, already_backed_up) = node_backup_cache.replace_or_remove_if_cached(
-                keyspace=snapshot_path.keyspace,
-                columnfamily=snapshot_path.columnfamily,
-                srcs=list(snapshot_path.list_files()))
+                num_files += len(needs_backup) + len(already_backed_up)
 
-            num_files += len(needs_backup) + len(already_backed_up)
+                tmp_dst_path = str(node_backup.datapath(keyspace=snapshot_path.keyspace,
+                                                        columnfamily=snapshot_path.columnfamily))
+                manifest_objects = list()
 
-            dst_path = str(node_backup.datapath(keyspace=snapshot_path.keyspace,
-                                                columnfamily=snapshot_path.columnfamily))
-            logging.debug("destination path: {}".format(dst_path))
+                if len(needs_backup) > 0:
+                    pattern = str(node_backup.data_path) + os.path.sep
+                    replace_by = pattern + hashlib.md5(data_dir.encode('utf-8')).hexdigest() + os.path.sep
+                    dst_path = tmp_dst_path.replace(pattern, replace_by)
+                    logging.debug("destination path: {}".format(dst_path))
+                    # If there is a plenty of files to upload it should be
+                    # splitted to batches due to 'gsutil cp' which
+                    # can't handle too much source files via STDIN.
+                    for src_batch in divide_chunks(needs_backup, GSUTIL_MAX_FILES_PER_CHUNK):
+                        manifest_objects += storage.storage_driver.upload_blobs(src_batch, dst_path)
 
-            manifest_objects = list()
-            if len(needs_backup) > 0:
-                # If there is a plenty of files to upload it should be
-                # splitted to batches due to 'gsutil cp' which
-                # can't handle too much source files via STDIN.
-                for src_batch in divide_chunks(needs_backup, GSUTIL_MAX_FILES_PER_CHUNK):
-                    manifest_objects += storage.storage_driver.upload_blobs(src_batch, dst_path)
+                # Reintroducing already backed up objects in the manifest in differential
+                for obj in already_backed_up:
+                    manifest_objects.append(obj)
 
-            # Reintroducing already backed up objects in the manifest in differential
-            for obj in already_backed_up:
-                manifest_objects.append(obj)
-
-            manifest.append(make_manifest_object(node_backup.fqdn, snapshot_path, manifest_objects, storage))
+                manifest.append(make_manifest_object(node_backup.fqdn, snapshot_path, manifest_objects, storage))
 
         return num_files
     except Exception as e:
@@ -389,6 +392,8 @@ def make_manifest_object(fqdn, snapshot_path, manifest_objects, storage):
             'path': url_to_path(manifest_object.path, fqdn, storage),
             'MD5': manifest_object.MD5,
             'size': manifest_object.size,
+            'data_dir': manifest_object.data_dir,
+            'data_dir_hash': manifest_object.data_dir_hash,
         } for manifest_object in manifest_objects]
     }
 

@@ -67,7 +67,7 @@ class AbstractStorage(abc.ABC):
             object_name=str(path),
             headers=headers,
         )
-        return medusa.storage.ManifestObject(obj.name, obj.size, obj.hash)
+        return medusa.storage.ManifestObject(obj.name, obj.size, obj.hash, '', '')
 
     def download_blobs(self, srcs, dest):
         """
