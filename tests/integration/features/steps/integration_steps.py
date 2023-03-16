@@ -1120,16 +1120,22 @@ def _the_backup_index_exists(context):
 def _i_can_see_nb_sstables_in_the_sstable_pool(
         context, nb_sstables, table_name, keyspace
 ):
+
+    cassandra_data_dirs = CassandraConfigReader(context.medusa_config.cassandra.config_file).data_dirs
     storage = Storage(config=context.medusa_config.storage)
-    path = os.path.join(
-        storage.prefix_path + context.medusa_config.storage.fqdn, "data", keyspace, table_name
-    )
-    objects = storage.storage_driver.list_objects(path)
-    sstables = list(filter(lambda obj: "-Data.db" in obj.name, objects))
+    base_path = os.path.join(storage.prefix_path + context.medusa_config.storage.fqdn, "data")
+    sstables = []
+    for data_dir in cassandra_data_dirs.keys():
+        data_dir_hash = hashlib.md5(data_dir.encode('utf-8')).hexdigest()
+        path = os.path.join(base_path, data_dir_hash, keyspace, table_name)
+
+        objects = storage.storage_driver.list_objects(path)
+        sstables = sstables + list(filter(lambda obj: "-Data.db" in obj.name, objects))
+
     if len(sstables) != int(nb_sstables):
         logging.error("{} SSTables : {}".format(len(sstables), sstables))
         logging.error("Was expecting {} SSTables".format(nb_sstables))
-        assert len(sstables) == int(nb_sstables)
+        assert len(sstables) == int(nb_sstables), f"count of sstables for {table_name} in {keyspace} is not correct!"
 
 
 @then(
