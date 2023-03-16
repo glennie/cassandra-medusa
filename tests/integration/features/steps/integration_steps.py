@@ -25,6 +25,7 @@ import subprocess
 import sys
 import time
 import uuid
+import hashlib
 from pathlib import Path
 from ssl import SSLContext, PROTOCOL_TLS, PROTOCOL_TLSv1_2, CERT_REQUIRED
 from subprocess import PIPE
@@ -69,6 +70,8 @@ from medusa.config import _namedtuple_from_dict
 from medusa.monitoring import LocalMonitoring
 from medusa.service.grpc import medusa_pb2
 from medusa.storage import Storage
+
+from medusa.cassandra_utils import CassandraConfigReader
 
 storage_prefix = "{}-{}".format(datetime.datetime.now().isoformat(), str(uuid.uuid4()))
 os.chdir("..")
@@ -752,16 +755,20 @@ def _i_can_see_no_backups(context):
 def _the_backup_named_backupname_has_nb_sstables_for_the_whatever_table(
         context, backup_name, nb_sstables, table_name, keyspace
 ):
+    cassandra_data_dirs = CassandraConfigReader(context.medusa_config.cassandra.config_file).data_dirs
     storage = Storage(config=context.medusa_config.storage)
-    path = os.path.join(
-        storage.prefix_path + context.medusa_config.storage.fqdn, backup_name, "data", keyspace, table_name
-    )
-    objects = storage.storage_driver.list_objects(path)
-    sstables = list(filter(lambda obj: "-Data.db" in obj.name, objects))
+    base_path = os.path.join(storage.prefix_path + context.medusa_config.storage.fqdn, backup_name, "data")
+    sstables = []
+    for data_dir in cassandra_data_dirs.keys():
+        data_dir_hash = hashlib.md5(data_dir.encode('utf-8')).hexdigest()
+        path = os.path.join(base_path, data_dir_hash, keyspace, table_name)
+        objects = storage.storage_driver.list_objects(path)
+        sstables = sstables + list(filter(lambda obj: "-Data.db" in obj.name, objects))
+
     if len(sstables) != int(nb_sstables):
         logging.error("{} SSTables : {}".format(len(sstables), sstables))
         logging.error("Was expecting {} SSTables".format(nb_sstables))
-        assert len(sstables) == int(nb_sstables)
+        assert len(sstables) == int(nb_sstables), "Unexpected count of backup table files"
 
 
 @then(r'I can verify the backup named "{backup_name}" with md5 checks "{md5_enabled_str}" successfully')
@@ -790,10 +797,25 @@ def _i_can_download_the_backup_all_tables_successfully(context, backup_name):
     medusa.download.download_cmd(context.medusa_config, backup_name, Path(download_path), keyspaces, tables, False)
 
     # check all manifest objects that have been backed up have been downloaded
-    keyspaces = {section['keyspace'] for section in json.loads(backup.manifest) if section['objects']}
-    for ks in keyspaces:
-        ks_path = os.path.join(download_path, ks)
-        assert os.path.isdir(ks_path)
+    manifest = json.loads(backup.manifest)
+    keyspaces_info = []
+    cassandra_data_dirs = []
+    for section in manifest:
+        if len(section.get('objects', [])) > 0:
+            keyspaces_info.append(section)
+
+    assert len(keyspaces_info) != 0, "keyspaces_info is empty in [_i_can_download_the_backup_all_tables_successfully]"
+    for keyspace in keyspaces_info:
+        ks = keyspace['keyspace']
+        for obj in keyspace['objects']:
+            data_dir = obj.get('data_dir', 'UNDEFINED_DATA_DIR')
+            if data_dir != 'UNDEFINED_DATA_DIR' and data_dir not in cassandra_data_dirs:
+                cassandra_data_dirs.append(data_dir)
+        assert len(cassandra_data_dirs) != 0, "cassandra_data_dir is empty"
+        for data_dir in cassandra_data_dirs:
+            data_dir_hash = hashlib.md5(data_dir.encode('utf-8')).hexdigest()
+            ks_path = os.path.join(download_path, data_dir_hash, ks)
+            assert os.path.isdir(ks_path), f"{ks_path} is not a directory"
 
     cleanup(download_path)
 
@@ -821,11 +843,27 @@ def _i_can_download_the_backup_single_table_successfully(context, backup_name, f
 
     # check the keyspace directory has been created
     ks, table = fqtn.split('.')
-    ks_path = os.path.join(download_path, ks)
-    assert os.path.isdir(ks_path)
 
-    # check tables have been downloaded
-    assert list(Path(ks_path).glob('{}-*/*.db'.format(table)))
+    manifest = json.loads(backup.manifest)
+    for keyspace in manifest:
+        cassandra_data_dirs = []
+        if keyspace.get('keyspace', None) == ks and keyspace.get('columnfamily', '').split('-')[0] == table:
+            objects = keyspace.get('objects', [])
+            if len(objects) > 0:
+                for obj in objects:
+                    data_dir = obj.get('data_dir', 'UNDEFINED_DATA_DIR')
+                    if data_dir != 'UNDEFINED_DATA_DIR' and data_dir not in cassandra_data_dirs:
+                        cassandra_data_dirs.append(data_dir)
+
+            assert len(cassandra_data_dirs) != 0, "cassandra_data_dirs is empty"
+
+            for data_dir in cassandra_data_dirs:
+                data_dir_hash = hashlib.md5(data_dir.encode('utf-8')).hexdigest()
+                ks_path = os.path.join(download_path, data_dir_hash, ks)
+                assert os.path.isdir(ks_path), f"{ks_path} is not a directory"
+
+                # check tables have been downloaded
+                assert list(Path(ks_path).glob('{}-*/*.db'.format(table))), f"{table} data files are missing!"
     cleanup(download_path)
 
 
