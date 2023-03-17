@@ -125,7 +125,8 @@ class NodeBackupCache(object):
         return retained, skipped
 
     def _make_manifest_object(self, path_prefix, cached_item):
-        return ManifestObject('{}{}'.format(path_prefix, cached_item['path']), cached_item['size'], cached_item['MD5'])
+        return ManifestObject('{}{}'.format(path_prefix, cached_item['path']), cached_item['size'], cached_item['MD5'],
+                              cached_item['data_dir'], cached_item['data_dir_hash'])
 
 
 def throttle_backup():
