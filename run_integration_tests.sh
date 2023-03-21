@@ -96,8 +96,8 @@ while test $# -gt 0; do
       shift
       ;;
     --cassandra-version*)
-      CASSANDRA_VERSION=`echo $1 | sed -e 's/^[^=]*=//g'`
-      shift
+      CASSANDRA_VERSION=`echo $2 | sed -e 's/^[^=]*=//g'`
+      shift 2
       ;;
     --no-coverage)
       COVERAGE="no"
