@@ -1304,14 +1304,19 @@ def _the_backup_named_is_incomplete(context, backup_name):
 def _i_delete_a_random_sstable(context, backup_name, table, keyspace):
     storage = Storage(config=context.medusa_config.storage)
     path_root = BUCKET_ROOT
-
     fqdn = "127.0.0.1"
-    path_sstables = "{}/{}{}/{}/data/{}/{}*".format(
-        path_root, storage.prefix_path, fqdn, backup_name, keyspace, table
-    )
+    sstable_files = []
+    cassandra_data_dirs = CassandraConfigReader(context.medusa_config.cassandra.config_file).data_dirs
 
-    table_path = glob.glob(path_sstables)[0]
-    sstable_files = os.listdir(table_path)
+    for data_dir in cassandra_data_dirs.keys():
+        data_dir_hash = hashlib.md5(data_dir.encode('utf-8')).hexdigest()
+        path_sstables = "{}/{}{}/{}/data/{}/{}/{}*".format(
+            path_root, storage.prefix_path, fqdn, backup_name, data_dir_hash, keyspace, table
+        )
+
+        table_path = glob.glob(path_sstables)[0]
+        sstable_files = sstable_files + os.listdir(table_path)
+
     random.shuffle(sstable_files)
     os.remove(os.path.join(table_path, sstable_files[0]))
 
