@@ -710,11 +710,16 @@ def _i_cannot_see_the_backup_named_backupname_when_i_list_the_backups(
 def _i_can_see_purged_backup_files_for_the_tablename_table_in_keyspace_keyspacename(
         context, can_see_purged, table_name, keyspace
 ):
+
     storage = Storage(config=context.medusa_config.storage)
-    path = os.path.join(
-        storage.prefix_path + context.medusa_config.storage.fqdn, "data", keyspace, table_name
-    )
-    sb_files = len(storage.storage_driver.list_objects(path))
+    base_path = os.path.join(storage.prefix_path + context.medusa_config.storage.fqdn, "data")
+    cassandra_data_dirs = CassandraConfigReader(context.medusa_config.cassandra.config_file).data_dirs
+    sb_files = 0
+
+    for data_dir in cassandra_data_dirs.keys():
+        data_dir_hash = hashlib.md5(data_dir.encode('utf-8')).hexdigest()
+        path = os.path.join(base_path, data_dir_hash, keyspace, table_name)
+        sb_files = sb_files + len(storage.storage_driver.list_objects(path))
 
     node_backups = storage.list_node_backups()
     # Parse its manifest
