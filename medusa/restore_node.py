@@ -195,45 +195,49 @@ def invoke_sstableloader(config, download_dir, keep_auth, fqtns_to_restore, stor
                                          medusa.utils.evaluate_boolean(
                                              config.kubernetes.enabled if config.kubernetes else False))
     cassandra_is_ccm = int(shlex.split(config.cassandra.is_ccm)[0])
-    keyspaces = os.listdir(str(download_dir))
-    for keyspace in keyspaces:
-        ks_path = os.path.join(str(download_dir), keyspace)
-        if os.path.isdir(ks_path) and keyspace_is_allowed_to_restore(keyspace, keep_auth, fqtns_to_restore):
-            logging.info('Restoring keyspace {} with sstableloader...'.format(ks_path))
-            for table in os.listdir(str(ks_path)):
-                table_path = os.path.join(str(ks_path), table)
-                if os.path.isdir(table_path) and table_is_allowed_to_restore(keyspace, table, fqtns_to_restore):
-                    logging.debug('Restoring table {} with sstableloader...'.format(table))
-                    cql_username = 'foo' if config.cassandra.cql_username is None else config.cassandra.cql_username
-                    cql_password = 'foo' if config.cassandra.cql_password is None else config.cassandra.cql_password
-                    sstableloader_args = [config.cassandra.sstableloader_bin,
-                                          '-d', hostname_resolver.resolve_fqdn() if cassandra_is_ccm == 0
-                                          else '127.0.0.1',
-                                          '--conf-path', config.cassandra.config_file,
-                                          '--username', cql_username,
-                                          '--password', cql_password,
-                                          '--no-progress',
-                                          '--port', str(native_port),
-                                          os.path.join(ks_path, table)]
-                    if storage_port != 7000:
-                        sstableloader_args.append("--storage-port")
-                        sstableloader_args.append(str(storage_port))
-                    if config.cassandra.sstableloader_ts is not None and \
-                            config.cassandra.sstableloader_tspw is not None and \
-                            config.cassandra.sstableloader_ks is not None and \
-                            config.cassandra.sstableloader_kspw is not None:
-                        sstableloader_args.append("-ts")
-                        sstableloader_args.append(config.cassandra.sstableloader_ts)
-                        sstableloader_args.append("-tspw")
-                        sstableloader_args.append(config.cassandra.sstableloader_tspw)
-                        sstableloader_args.append("-ks")
-                        sstableloader_args.append(config.cassandra.sstableloader_ks)
-                        sstableloader_args.append("-kspw")
-                        sstableloader_args.append(config.cassandra.sstableloader_kspw)
 
-                    output = subprocess.check_output(sstableloader_args)
-                    for line in output.decode('utf-8').split('\n'):
-                        logging.debug(line)
+    data_dirs_hashes = []
+    keyspaces = []
+
+    for data_dir in Cassandra(config).data_dirs.keys():
+        data_dirs_hashes.append(hashlib.md5(str(data_dir).encode('utf-8')).hexdigest())
+
+    for data_dirs_hash in data_dirs_hashes:
+        keyspaces = keyspaces + (os.listdir(str(download_dir) + os.path.sep + data_dirs_hash))
+        for keyspace in keyspaces:
+            ks_path = os.path.join(str(download_dir), data_dirs_hash, keyspace)
+            if os.path.isdir(ks_path) and keyspace_is_allowed_to_restore(keyspace, keep_auth, fqtns_to_restore):
+                logging.info('Restoring keyspace {} with sstableloader...'.format(ks_path))
+                for table in os.listdir(str(ks_path)):
+                    table_path = os.path.join(str(ks_path), table)
+                    if os.path.isdir(table_path) and table_is_allowed_to_restore(keyspace, table, fqtns_to_restore):
+                        logging.debug('Restoring table {} with sstableloader...'.format(table))
+                        cql_username = 'foo' if config.cassandra.cql_username is None else config.cassandra.cql_username
+                        cql_password = 'foo' if config.cassandra.cql_password is None else config.cassandra.cql_password
+                        sstableloader_args = [config.cassandra.sstableloader_bin,
+                                              '-d', hostname_resolver.resolve_fqdn()
+                                              if cassandra_is_ccm == 0 else '127.0.0.1', '--conf-path',
+                                              config.cassandra.config_file, '--username', cql_username,
+                                              '--password', cql_password, '--no-progress', '--port',
+                                              str(native_port), os.path.join(ks_path, table)]
+                        if storage_port != 7000:
+                            sstableloader_args.append("--storage-port")
+                            sstableloader_args.append(str(storage_port))
+                        if config.cassandra.sstableloader_ts is not None and \
+                                config.cassandra.sstableloader_tspw is not None and \
+                                config.cassandra.sstableloader_ks is not None and \
+                                config.cassandra.sstableloader_kspw is not None:
+                            sstableloader_args.append("-ts")
+                            sstableloader_args.append(config.cassandra.sstableloader_ts)
+                            sstableloader_args.append("-tspw")
+                            sstableloader_args.append(config.cassandra.sstableloader_tspw)
+                            sstableloader_args.append("-ks")
+                            sstableloader_args.append(config.cassandra.sstableloader_ks)
+                            sstableloader_args.append("-kspw")
+                            sstableloader_args.append(config.cassandra.sstableloader_kspw)
+                        output = subprocess.check_output(sstableloader_args)
+                        for line in output.decode('utf-8').split('\n'):
+                            logging.debug(line)
 
 
 def keyspace_is_allowed_to_restore(keyspace, keep_auth, fqtns_to_restore):
